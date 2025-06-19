@@ -10,20 +10,13 @@ if __name__ == "__main__":
         "einops",
         "einops-exts",
         "transformers>=4.28.1",
-        "torch==2.0.1",
+        "torch>=2.1.2",
+        "torchvision>=0.16.2",
+        "triton==2.1.0",
+        "numpy==1.26.0",
         "pillow",
         "open_clip_torch>=2.16.0",
         "sentencepiece",
-    ]
-
-    EVAL = [
-        "scipy",
-        "torchvision",
-        "nltk",
-        "inflection",
-        "pycocoevalcap",
-        "pycocotools",
-        "tqdm",
     ]
 
     TRAINING = [
@@ -35,10 +28,10 @@ if __name__ == "__main__":
     ]
 
     setup(
-        name="open_flamingo",
+        name="pathoMozhi",
         packages=find_packages(),
         include_package_data=True,
-        version="2.0.1",
+        version="0.1.0",
         license="MIT",
         description="An open-source framework for training large multimodal models",
         long_description=long_description,
@@ -47,9 +40,7 @@ if __name__ == "__main__":
         keywords=["machine learning"],
         install_requires=REQUIREMENTS,
         extras_require={
-            "eval": EVAL,
             "training": TRAINING,
-            "all": list(set(REQUIREMENTS + EVAL + TRAINING)),
         },
         classifiers=[
             "Development Status :: 4 - Beta",

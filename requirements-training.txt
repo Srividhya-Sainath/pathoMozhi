@@ -3,3 +3,15 @@ braceexpand
 webdataset
 tqdm
 wandb
+scipy
+torchvision
+nltk
+inflection
+pycocoevalcap
+pycocotools
+scikit-learn
+black
+mypy
+pylint
+pytest
+requests

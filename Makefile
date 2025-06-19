@@ -6,9 +6,9 @@ install-dev: ## [Local development] Install test requirements
 	python -m pip install -r requirements-dev.txt
 
 lint: ## [Local development] Run mypy, pylint and black
-	python -m mypy open_flamingo
-	python -m pylint open_flamingo
-	python -m black --check -l 120 open_flamingo
+	python -m mypy pathoMozhi
+	python -m pylint pathoMozhi
+	python -m black --check -l 120 pathoMozhi
 
 black: ## [Local development] Auto-format python code using black
 	python -m black -l 120 .
