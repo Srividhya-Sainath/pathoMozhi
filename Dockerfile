@@ -1,8 +1,13 @@
 # Base image with CUDA and PyTorch
 FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
 
+# Create a non-root user and group
+RUN groupadd -r appgroup && useradd --no-log-init -r -g appgroup appuser
+
 # Set working directory
 WORKDIR /app
+COPY . /app
+RUN chown -R appuser:appgroup /app
 
 # Install system packages
 RUN apt-get update && apt-get install -y \
@@ -11,9 +16,6 @@ RUN apt-get update && apt-get install -y \
     curl \
     libgl1-mesa-glx \
     && rm -rf /var/lib/apt/lists/*
-
-# Copy project files into container
-COPY . /app
 
 # Install Python dependencies
 RUN pip install --upgrade pip
