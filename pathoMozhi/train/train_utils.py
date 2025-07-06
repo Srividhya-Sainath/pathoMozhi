@@ -159,7 +159,17 @@ def train_one_epoch(
                     output["cls_logits2"] = cls_logits2  # for logging
                 else:
                     print("Warning: output.hidden_states is None, skipping diagnosisnoclass loss.")
-
+            elif args.cls == "diagnosisAttn":
+                if output.get("hidden_states") is not None:
+                    hidden_states = output["hidden_states"][-1]
+                    attn_weights = model.attn_pool(hidden_states).softmax(dim=1)
+                    pooled = (hidden_states * attn_weights).sum(dim=1)
+                    cls_logits2 = model.cls_head2(pooled)
+                    loss_cls2 = diag_loss_fn(cls_logits2, diagnosis_label)
+                    loss = loss + loss_cls2
+                    output["cls_logits2"] = cls_logits2  # for logging
+                else:
+                    print("Warning: output.hidden_states is None, skipping diagnosisAttn loss.")
             if args.lambda_gate > 0:
                 #print("[DEBUG] Applying gate regularization")
                 all_attn_gates = [

@@ -38,7 +38,7 @@ class PathDataset(Dataset):
         elif self.cls_type == "diagnosis":
             prompt = "<cls2> <image> Final Diagnosis:"
         else:
-            prompt = "<image>"
+            prompt = "<image> Final Diagnosis:"
         text = f"{report_text} <|endofchunk|>"
 
         # Logging the file_path and raw_text

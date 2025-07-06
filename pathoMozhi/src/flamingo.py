@@ -40,6 +40,9 @@ class Flamingo(nn.Module):
             self.cls_head1 = nn.Linear(self.lang_dim, num_organ_classes)
         if cls_type in ["diagnosis", "both", "diagnosisnoclass"]:
             self.cls_head2 = nn.Linear(self.lang_dim, num_diagnosis_classes)
+        if cls_type == "diagnosisAttn":
+            self.attn_pool = nn.Linear(self.lang_dim, 1)
+            self.cls_head2 = nn.Linear(self.lang_dim, num_diagnosis_classes)
         self.perceiver = PerceiverResampler(dim=self.vis_dim)
         self.lang_encoder = lang_encoder
         self.lang_encoder.init_flamingo(

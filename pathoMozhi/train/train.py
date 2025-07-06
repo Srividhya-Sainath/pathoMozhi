@@ -53,7 +53,7 @@ def main():
     parser.add_argument("--logging_steps", type=int, default=100)
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--lambda_gate", type=float, default=0.1, help="Weight for the gate loss, if applicable.")
-    parser.add_argument("--cls", type=str, default="both", choices=["None", "organ", "diagnosis", "both", "diagnosisnoclass"], help="Type of classification to include in training.")
+    parser.add_argument("--cls", type=str, default="both", choices=["None", "organ", "diagnosis", "both", "diagnosisnoclass", "diagnosisAttn"], help="Type of classification to include in training.")
 
     # data
     parser.add_argument("--vision_features", type=str, required=True)
@@ -120,7 +120,8 @@ def main():
             return {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
 
         ckpt = torch.load(args.perceiver, map_location="cpu")
-        ckpt = {k: v for k, v in ckpt.items() if "classifier" not in k.lower()}
+        excluded_keys = ["classifier", "attn_weights"]
+        ckpt = {k: v for k, v in ckpt.items() if not any(ex in k.lower() for ex in excluded_keys)}
         ckpt = strip_prefix_if_present(ckpt)
         msg = model.perceiver.load_state_dict(ckpt, strict=False)
         if args.rank == 0:
@@ -293,9 +294,9 @@ def main():
         diag_weights = diag_weights / diag_weights.sum() * num_diag_classes
         organ_loss_fn, diag_loss_fn = None, None
         if args.cls in ["organ", "both"]:
-            organ_loss_fn = torch.nn.CrossEntropyLoss()
-        if args.cls in ["diagnosis", "both", "diagnosisnoclass"]:
-            diag_loss_fn = torch.nn.CrossEntropyLoss()
+            organ_loss_fn = torch.nn.CrossEntropyLoss(weight=organ_weights)
+        if args.cls in ["diagnosis", "both", "diagnosisnoclass", "diagnosisAttn"]:
+            diag_loss_fn = torch.nn.CrossEntropyLoss(weight=diag_weights)
         cls_loss_fns = (organ_loss_fn, diag_loss_fn)
 
         train_one_epoch(

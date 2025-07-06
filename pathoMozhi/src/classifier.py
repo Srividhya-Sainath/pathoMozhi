@@ -13,21 +13,34 @@ from pathoMozhi.src.helpers import PerceiverResampler
 from pathoMozhi.train.train_utils import create_feature_loader
 
 class ClassifierOnPerceiver(nn.Module):
-    def __init__(self, perceiver, num_classes):
+    def __init__(self, perceiver, num_classes, pooling="attn"):
         super().__init__()
         self.perceiver = perceiver
+        self.pooling = pooling
+        self.latent_dim = perceiver.latents.shape[1]
+        if pooling == "attn":
+            self.attn_weights = nn.Sequential(
+                nn.LayerNorm(self.latent_dim),
+                nn.Linear(self.latent_dim, 1)
+            )
         self.classifier = nn.Sequential(
-            nn.AdaptiveAvgPool1d(1),
-            nn.Flatten(),
-            nn.Linear(perceiver.latents.shape[1], 256), # Batch -- [1024, 768] -> [1, 768] --> [1, 256]
+            nn.Linear(self.latent_dim, 256),
             nn.ReLU(),
             nn.Linear(256, num_classes)
         )
+
     def forward(self, x):
         x = x.unsqueeze(2)
-        print(f"Input shape: {x.shape}")
-        latents = self.perceiver(x).squeeze(1).transpose(1, 2)
-        return self.classifier(latents)
+        # print(f"Input shape: {x.shape}")
+        latents = self.perceiver(x).squeeze(1)  # shape: (B, N, D)
+        if self.pooling == "avg":
+            pooled = latents.mean(dim=1)
+        elif self.pooling == "attn":
+            weights = self.attn_weights(latents).softmax(dim=1)  # (B, N, 1)
+            pooled = (latents * weights).sum(dim=1)
+        else:
+            raise ValueError(f"Unknown pooling type: {self.pooling}")
+        return self.classifier(pooled)
 
 class PathDataset(Dataset):
     def __init__(self, df, feature_loader):
@@ -70,10 +83,10 @@ def train(csv_file, feature_loader, project_name="perceiver_pretrain", run_name=
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     perceiver = PerceiverResampler(dim=768).to(device)
-    model = ClassifierOnPerceiver(perceiver, num_classes=len(label_encoder.classes_)).to(device)
+    model = ClassifierOnPerceiver(perceiver, num_classes=len(label_encoder.classes_), pooling="attn").to(device)
 
-    class_weights = compute_class_weights(train_df["organ"])
-    loss_fn = nn.CrossEntropyLoss(weight=class_weights.to(device))
+    class_weights_tensor = compute_class_weights(train_df["organ"]).to(device)
+    loss_fn = nn.CrossEntropyLoss(weight=class_weights_tensor)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
@@ -81,6 +94,9 @@ def train(csv_file, feature_loader, project_name="perceiver_pretrain", run_name=
     val_loader = DataLoader(val_ds, batch_size=32)
 
     best_acc = 0.0
+    best_val_loss = float('inf')
+    patience = 20
+    epochs_without_improvement = 0
     for epoch in range(100):
         model.train()
         total_loss = 0
@@ -96,25 +112,40 @@ def train(csv_file, feature_loader, project_name="perceiver_pretrain", run_name=
 
         model.eval()
         preds, trues = [], []
+        val_loss = 0
         with torch.no_grad():
             for x, y in tqdm(val_loader, desc=f"Epoch {epoch+1} [Val]"):
                 x = x.to(device)
                 logits = model(x)
+                loss = loss_fn(logits, y.to(device))
+                val_loss += loss.item()
                 preds.extend(logits.argmax(dim=1).cpu().tolist())
                 trues.extend(y.tolist())
-
+        avg_train_loss = total_loss / len(train_loader)
+        avg_val_loss = val_loss / len(val_loader)
         acc = accuracy_score(trues, preds)
         wandb.log({
             "epoch": epoch + 1,
-            "train_loss": total_loss / len(train_loader),
+            "train_loss": avg_train_loss,
+            "val_loss": avg_val_loss,
             "val_accuracy": acc
         })
-        print(f"Epoch {epoch + 1} - Train Loss: {total_loss / len(train_loader):.4f} - Val Accuracy: {acc:.4f}")
+        print(f"Epoch {epoch + 1} - Train Loss: {avg_train_loss:.4f} - Val Loss: {avg_val_loss:.4f} - Val Accuracy: {acc:.4f}")
 
         if acc > best_acc:
             best_acc = acc
-            torch.save(model.state_dict(), "/mnt/bulk-titan/vidhya/pathMozhi/pathoMozhi/best_perceiver_classifier.pt")
-            wandb.save("OrganClassifier.pt")
+            checkpoint_path = f"/mnt/bulk-titan/vidhya/pathMozhi/pathoMozhi/best_perceiver_classifier_epoch{epoch+1}_valacc{acc:.4f}_trainloss{avg_train_loss:.4f}_valloss{avg_val_loss:.4f}.pt"
+            torch.save(model.state_dict(), checkpoint_path)
+            wandb.save(checkpoint_path)
+
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= patience:
+                print(f"Early stopping at epoch {epoch+1} due to no improvement in val loss.")
+                break
 
     wandb.finish()
 
