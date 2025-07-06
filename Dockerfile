@@ -1,30 +1,27 @@
-# Base image with CPU-only PyTorch
-FROM pytorch/pytorch:2.1.0-cpu
+# Use slim Python image (CPU only, lightweight)
+FROM python:3.9-slim
 
-# Create a non-root user and group
-RUN groupadd -r appgroup && useradd --no-log-init -r -g appgroup appuser
+# Set environment variables to reduce Python buffering issues
+ENV PYTHONUNBUFFERED=1 \
+    TRANSFORMERS_CACHE=/app/cache
 
-# Set working directory
+# Create working directory
 WORKDIR /app
 
-# Copy project files and set ownership
+# Copy code into the image
 COPY . /app
-RUN chown -R appuser:appgroup /app
 
-# Install system packages
-RUN apt-get update && apt-get install -y \
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     wget \
     curl \
     libgl1-mesa-glx \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip and install Python dependencies
+# Upgrade pip and install dependencies
 RUN pip install --upgrade pip
 RUN pip install -e .[training]
 
-# Set environment variable for HuggingFace cache
-ENV TRANSFORMERS_CACHE=/app/cache
-
-# Set default command
+# Default run command
 CMD ["python", "pathoMozhi/train/train.py"]
