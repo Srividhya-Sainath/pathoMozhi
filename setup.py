@@ -15,15 +15,11 @@ if __name__ == "__main__":
         "triton==2.1.0",
         "numpy==1.26.0",
         "pillow",
-        "open_clip_torch>=2.16.0",
-        "sentencepiece",
     ]
 
     TRAINING = [
         "wandb",
         "torchvision",
-        "braceexpand",
-        "webdataset",
         "tqdm",
     ]
 
