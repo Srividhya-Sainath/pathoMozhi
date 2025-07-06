@@ -1,11 +1,13 @@
-# Base image with CUDA and PyTorch
-FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
+# Base image with CPU-only PyTorch
+FROM pytorch/pytorch:2.1.0-cpu
 
 # Create a non-root user and group
 RUN groupadd -r appgroup && useradd --no-log-init -r -g appgroup appuser
 
 # Set working directory
 WORKDIR /app
+
+# Copy project files and set ownership
 COPY . /app
 RUN chown -R appuser:appgroup /app
 
@@ -17,12 +19,12 @@ RUN apt-get update && apt-get install -y \
     libgl1-mesa-glx \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+# Upgrade pip and install Python dependencies
 RUN pip install --upgrade pip
 RUN pip install -e .[training]
 
-# (Optional) For HuggingFace transformers cache
+# Set environment variable for HuggingFace cache
 ENV TRANSFORMERS_CACHE=/app/cache
 
-# Set default command (override during inference)
+# Set default command
 CMD ["python", "pathoMozhi/train/train.py"]
