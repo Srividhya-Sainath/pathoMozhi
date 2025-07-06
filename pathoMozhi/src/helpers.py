@@ -70,10 +70,10 @@ class PerceiverResampler(nn.Module):
         self,
         *,
         dim,
-        depth=6, # Reduced from 6 --> 4
+        depth=6,
         dim_head=64,
         heads=8,
-        num_latents=1024, # Increased from 64 --> 128
+        num_latents=1024,
         max_num_media=None,
         max_num_frames=None,
         ff_mult=4,
@@ -129,7 +129,8 @@ class PerceiverResampler(nn.Module):
         for attn, ff in self.layers:
             latents = attn(x, latents) + latents
             latents = ff(latents) + latents
-        return self.norm(latents)
+        latents = self.norm(latents)
+        return latents
 
 
 # gated cross attention

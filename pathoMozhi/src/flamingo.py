@@ -9,12 +9,15 @@ class Flamingo(nn.Module):
         eoc_token_id: int, # The token ID for <|endofchunk|>
         media_token_id: int, # The token ID for <image>
         vis_dim: int,
+        tokenizer,
         cross_attn_every_n_layers: int = 1,
         gradient_checkpointing: bool = False,
+        num_organ_classes: int = 9,
+        num_diagnosis_classes: int = 38,
+        cls_type="both",
     ):
         """
         Args:
-            #vision_encoder (nn.Module): HF CLIPModel
             lang_encoder (nn.Module): HF causal language model
             eoc_token_id (int): Token id for <|endofchunk|>
             media_token_id (int): Token id for <image>
@@ -26,14 +29,18 @@ class Flamingo(nn.Module):
         self.eoc_token_id = eoc_token_id
         self.media_token_id = media_token_id
         self.vis_dim = vis_dim # Ideally 768 hona chahiye. Both TITAN and CONCHv1.5 ka 768 hi hai
+        self.tokenizer = tokenizer
         if hasattr(lang_encoder.config, "d_model"):
             self.lang_dim = lang_encoder.config.d_model  # mpt uses d_model
         else:
             #self.lang_dim = lang_encoder.config.hidden_size
             self.lang_dim = lang_encoder.get_input_embeddings().embedding_dim
-
-        # self.vision_encoder = vision_encoder.visual # Iski zaroorat nahi hai
-        self.perceiver = PerceiverResampler(dim=self.vis_dim) # Perceiver downsamples vision features into a fixed number of visual tokens
+        self.cls_type = cls_type
+        if cls_type in ["organ", "both"]:
+            self.cls_head1 = nn.Linear(self.lang_dim, num_organ_classes)
+        if cls_type in ["diagnosis", "both", "diagnosisnoclass"]:
+            self.cls_head2 = nn.Linear(self.lang_dim, num_diagnosis_classes)
+        self.perceiver = PerceiverResampler(dim=self.vis_dim)
         self.lang_encoder = lang_encoder
         self.lang_encoder.init_flamingo(
             media_token_id=media_token_id,
@@ -57,28 +64,16 @@ class Flamingo(nn.Module):
     ):
         """
         Forward pass of Flamingo.
-
         Args:
-            vision_x (torch.Tensor): Precomputed image embeddings
-            shape (B,T_img,F,V, D)
-            B: Batch size, T_img: Number of images in a sequence, F: Frames, V: Visual tokens, D: Embedding dimension
-            V: Visual tokens (set to 1 for global embeddings)
-            T and F: Set to 1 (no temporal component. Static images ONLY)
-            D: Embedding dimension
-            lang_x (torch.Tensor): Language input ids
-                shape (B, T_txt)
-                T_txt (Sequence length of text tokens)
-            attention_mask (torch.Tensor, optional): Attention mask. Defaults to None.
-            labels (torch.Tensor, optional): Labels. Defaults to None.
-            clear_conditioned_layers: if True, clear the conditioned layers
-                once the foward pass is completed. Set this to false if the
-                same set of images will be reused in another subsequent
-                forward pass.
-            past_key_values: pre-computed values to pass to language model.
-                See past_key_values documentation in Hugging Face
-                CausalLM models.
-            use_cache: whether to use cached key values. See use_cache
-                documentation in Hugging Face CausalLM models.
+            vision_x (torch.Tensor): Precomputed image embeddings of shape [B, T_img, D]
+            lang_x (torch.Tensor): Language input ids [B, T_txt]
+            attention_mask (torch.Tensor, optional): Attention mask [B, T_txt]
+            labels (torch.Tensor, optional): Labels for AR loss
+            clear_conditioned_layers (bool): Whether to clear vision/text condition after pass
+            past_key_values: For cached decoding (HuggingFace compat)
+            use_cache (bool): Whether to use key/value cache (HuggingFace compat)
+        Returns:
+            Tuple: (ar_loss)
         """
         assert (
             self.lang_encoder.initialized_flamingo
@@ -108,6 +103,32 @@ class Flamingo(nn.Module):
             past_key_values=past_key_values,
             use_cache=use_cache,
         )
+
+        # Optional: get final hidden states for classifier heads
+        if output.hidden_states is not None:
+            hidden_states = output.hidden_states[-1]  # (B, T, D)
+            B = hidden_states.size(0)
+
+            if self.cls_type in ["organ", "both"]:
+                cls1_id = self.tokenizer.convert_tokens_to_ids("<cls1>")
+                cls1_mask = (lang_x == cls1_id)
+                if cls1_mask.sum(dim=1).min() < 1:
+                    raise ValueError("Expected <cls1> token per sample for organ classification.")
+                cls_feats1 = hidden_states[cls1_mask].view(B, -1)
+                output["cls_logits1"] = self.cls_head1(cls_feats1)
+
+            if self.cls_type == "diagnosisnoclass":
+                cls_feats2 = hidden_states[:, -1, :]  # use last token embedding
+                output["cls_logits2"] = self.cls_head2(cls_feats2)
+            elif self.cls_type in ["diagnosis", "both"]:
+                cls2_id = self.tokenizer.convert_tokens_to_ids("<cls2>")
+                cls2_mask = (lang_x == cls2_id)
+                if cls2_mask.sum(dim=1).min() < 1:
+                    raise ValueError("Expected <cls2> token per sample for diagnosis classification.")
+                cls_feats2 = hidden_states[cls2_mask].view(B, -1)
+                output["cls_logits2"] = self.cls_head2(cls_feats2)
+        else:
+            print("output.hidden_states is None")
 
         if clear_conditioned_layers:
             self.lang_encoder.clear_conditioned_layers()
@@ -161,22 +182,22 @@ class Flamingo(nn.Module):
             attention_mask=attention_mask,
             eos_token_id=eos_token_id,
             num_beams=num_beams,
-            repetition_penalty=kwargs.get("repetition_penalty", 1.2),
-            no_repeat_ngram_size=kwargs.get("no_repeat_ngram_size", 3),
+            no_repeat_ngram_size=3,
+            repetition_penalty=1.2,
             **kwargs,
             )
 
         self.lang_encoder.clear_conditioned_layers()
         self.lang_encoder._use_cached_vision_x = False
-        del self.lang_encoder.cached_input_ids
         return output
     
     def _encode_vision_x(self, vision_x: torch.Tensor):
         """
         Prepare global embeddings to align with (B, T_img, F, V, D) format.
-
         Args:
             vision_x (torch.Tensor): Precomputed image embeddings of shape (B, T_img, D)
+        Returns:
+            vision_latents (torch.Tensor): Latent features to condition the LM
         """
         assert vision_x.ndim == 4, f"Expected image shape [B,Tm,N,D], got {vision_x.shape}"
         B, T_img, V, D = vision_x.shape

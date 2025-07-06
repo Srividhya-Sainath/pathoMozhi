@@ -53,6 +53,7 @@ class FlamingoLayer(nn.Module):
                     "media_locations must be conditioned before forward pass"
                 )
 
+            # print(f"[DEBUG] Cross-attending with vis_x shape: {self.vis_x.shape}")
             lang_x = self.gated_cross_attn_layer(
                 lang_x,
                 self.vis_x,
@@ -134,6 +135,7 @@ class FlamingoLMMixin(nn.Module):
             )
 
         media_locations = input_ids == self.media_token_id
+        #print(f"[DEBUG] Media token locations: {media_locations.sum().item()} tokens in batch")
 
         # if there are media already cached and we're generating and there are no media tokens in the input,
         # we'll assume that ALL input tokens should attend to the last previous media that is cached.
@@ -151,10 +153,16 @@ class FlamingoLMMixin(nn.Module):
                 layer.condition_media_locations(media_locations)
             layer.condition_use_cached_media(use_cached_media_locations)
 
+        # if not use_cached_media_locations:
+        #     print("[DEBUG] Media locations conditioned freshly for this batch.")
+        # else:
+        #     print("[DEBUG] Using cached vision features for this batch.")
+
         # package arguments for the other parent's forward. since we don't know the order of the arguments,
         # make them all kwargs
         kwargs["input_ids"] = input_ids
         kwargs["attention_mask"] = attention_mask
+        kwargs["output_hidden_states"] = True
         return super().forward(**kwargs)  # Call the other parent's forward method
 
     def is_conditioned(self) -> bool:

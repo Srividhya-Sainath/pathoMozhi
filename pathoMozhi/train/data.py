@@ -1,34 +1,28 @@
 import json
 import math
-import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
-from pathoMozhi.train.data_utils import *
-from pathoMozhi.train.train_utils import get_cast_dtype
+from data_utils import *
+from train_utils import get_cast_dtype
 
 class PathDataset(Dataset):
-    def __init__(self, jsonl_file, tokenizer, feature_loader, epoch=0, max_tokens=256):
+    def __init__(self, jsonl_file, tokenizer, feature_loader, epoch=0, max_tokens=312, cls_type="both"):
         self.tokenizer = tokenizer
         self.feature_loader = feature_loader
         self.epoch = epoch
         self.max_tokens = max_tokens
+        self.cls_type = cls_type
         self.entries = self._load_entries(jsonl_file)
-        self.instructions = [
-            "Provide a report.",
-            "Describe key findings.",
-            "Summarize abnormalities if any precisely.",
-            "Generate a detailed pathology summary.",
-            "State the diagnostic observations clearly.",
-            "State relevant abnormalities if observed.",
-            "Summarize the microscopic findings.",
-            "Report any unusual tissue patterns, if present."
-            "Identify key pathological features.",
-            "Provide concise diagnostic impressions.",
-        ]
+        self.organ2id = self._build_vocab(self.entries, key="organ")
+        self.diag2id = self._build_vocab(self.entries, key="diagnosis")
 
     def _load_entries(self, jsonl_file):
         with open(jsonl_file, "r") as f:
             return [json.loads(line) for line in f]
+        
+    def _build_vocab(self, entries, key):
+        values = sorted(set(entry[key] for entry in entries))
+        return {v: i for i, v in enumerate(values)}
 
     def __len__(self):
         return len(self.entries)
@@ -37,52 +31,58 @@ class PathDataset(Dataset):
         entry = self.entries[idx]
         report_text = entry.get("result", "")
         file_path = entry["file_path"]
-        instruction = np.random.choice(self.instructions)
-        processed_text = f"<image> {instruction} {report_text} <|endofchunk|>"
-        num_image_tokens = processed_text.count("<image>")
+        if self.cls_type == "both":
+            prompt = "<cls1> <cls2> <image> Final Diagnosis:"
+        elif self.cls_type == "organ":
+            prompt = "<cls1> <image> Final Diagnosis:"
+        elif self.cls_type == "diagnosis":
+            prompt = "<cls2> <image> Final Diagnosis:"
+        else:
+            prompt = "<image>"
+        text = f"{report_text} <|endofchunk|>"
+
+        # Logging the file_path and raw_text
+        log_entry = {
+            "file_path": file_path,
+            "text": text
+        }
+        with open(f"data_log_epoch_{self.epoch}.jsonl", "a", encoding="utf-8") as log_f:
+            log_f.write(json.dumps(log_entry) + "\n")
+
         text_encoding = self.tokenizer(
-            processed_text,
+            prompt,
+            text,
             max_length=self.max_tokens,
-            truncation=True,
+            truncation="only_second",
             padding="max_length",
             return_tensors="pt",
             )
         input_ids = text_encoding["input_ids"].squeeze(0)
         attention_mask = text_encoding["attention_mask"].squeeze(0)
         labels = input_ids.clone()
-        prompt_prefix = f"<image> {instruction}"
-        prefix_ids = self.tokenizer(
-                prompt_prefix,
-                max_length=self.max_tokens,
-                truncation=True,
-                padding="max_length",
-                return_tensors="pt"
-            )["input_ids"].squeeze(0)
-        prefix_len = (prefix_ids != self.tokenizer.pad_token_id).sum().item()
-
-        labels[:prefix_len] = -100
         labels[input_ids == self.tokenizer.pad_token_id] = -100
         labels[input_ids == self.tokenizer.convert_tokens_to_ids("<image>")] = -100
-
-        image_token_id = self.tokenizer.convert_tokens_to_ids("<image>")
-        image_token_mask = (input_ids == image_token_id)
+        if self.cls_type in ["organ", "both"]:
+            labels[input_ids == self.tokenizer.convert_tokens_to_ids("<cls1>")] = -100
+        if self.cls_type in ["diagnosis", "both"]:
+            labels[input_ids == self.tokenizer.convert_tokens_to_ids("<cls2>")] = -100
 
         assert self.feature_loader is not None, f"Feature loader is None for file {file_path}"
         feature_dict = self.feature_loader(file_path)
         features = feature_dict["feature"]
-        if num_image_tokens > 1:
-            print(f"[MULTI-IMAGE WARNING] {file_path} has {num_image_tokens} <image> tokens")
         if features.ndim == 2:
-            num_repeats = num_image_tokens if num_image_tokens > 0 else 1
-            features = features.unsqueeze(0).repeat(num_repeats, 1, 1)
+            features = features.unsqueeze(0)
+        organ_label = self.organ2id[entry["organ"]]
+        diagnosis_label = self.diag2id[entry["diagnosis"]]
         return {
             "file_path": file_path,
-            "raw_text": processed_text,
+            "raw_text": text,
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": labels,
             "features": features,
-            "image_token_mask": image_token_mask,
+            "organ_label": organ_label,
+            "diagnosis_label": diagnosis_label,
         }
 
 def collate_fn(batch, cast_dtype=None):
@@ -96,7 +96,8 @@ def collate_fn(batch, cast_dtype=None):
         "attention_mask": torch.stack([sample["attention_mask"] for sample in batch]),
         "labels": torch.stack([sample["labels"] for sample in batch]),
         "images": images,
-        "image_token_mask": torch.stack([sample["image_token_mask"] for sample in batch]),
+        "organ_label": torch.tensor([sample["organ_label"] for sample in batch], dtype=torch.long),
+        "diagnosis_label": torch.tensor([sample["diagnosis_label"] for sample in batch], dtype=torch.long),
     }
 
 def build_dataset(args, tokenizer, feature_loader, epoch=0, floor=False):
@@ -108,7 +109,10 @@ def build_dataset(args, tokenizer, feature_loader, epoch=0, floor=False):
         tokenizer=tokenizer,
         feature_loader=feature_loader,
         max_tokens=args.max_tokens,
+        cls_type=args.cls,
+        epoch=epoch,  # Pass epoch to dataset
     )
+    dataset.epoch = epoch  # Ensure epoch is set for proper logging
 
     sampler = None
     if args.world_size > 1:

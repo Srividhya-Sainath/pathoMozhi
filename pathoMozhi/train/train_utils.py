@@ -1,45 +1,45 @@
 import time
-import h5py
 from contextlib import suppress
 import torch
 from tqdm import tqdm
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import (
-    FullStateDictConfig,
-    StateDictType,
-)
-from torch.distributed.fsdp.api import FullOptimStateDictConfig
 import os
 import wandb
 
-def create_feature_loader(base_path_template: str, epoch: int = 0):
+def create_feature_loader(base_path_template: str, epoch: int = 0, augment: bool = False):
     """
-    Loads .pt features from the specified base path template.
+    Loads .pt features from the specified list of base path templates.
     """
+    base_path_template = base_path_template.split(",")
     def feature_loader(file_path: str):
         filename = file_path.replace(".h5", ".pt")
-
-        pt_file = os.path.join(base_path_template.format(epoch=epoch), filename)
-
-        if not os.path.exists(pt_file):
-            raise FileNotFoundError(f"File not found: {filename}")
-
+        pt_file = None
+        for base_path in base_path_template:
+            candidate_path = os.path.join(base_path.format(epoch=epoch), filename)
+            if os.path.exists(candidate_path):
+                pt_file = candidate_path
+                break
+        if pt_file is None:
+            raise FileNotFoundError(f"File not found in any base path: {filename}")
         try:
             data = torch.load(pt_file, map_location="cpu", weights_only=True)
         except (EOFError, RuntimeError) as e:
             print(f"[ERROR: torch.load failed] Epoch: {epoch}, File: {pt_file}, Error: {e}")
             raise e
-
         if isinstance(data, dict) and "features" in data:
             feats = data["features"]
         elif isinstance(data, torch.Tensor):
             feats = data
         else:
             raise ValueError(f"Invalid .pt structure for file: {pt_file}")
-
         if feats.ndim != 2 or feats.shape[1] != 768:
             raise ValueError(f"Expected shape [N, 768] in file {pt_file}, but got {feats.shape}")
-
+        if augment:
+            idx = torch.randperm(feats.size(0))
+            feats = feats[idx]
+            proj_matrix = torch.randn(feats.size(1), feats.size(1), device=feats.device)
+            feats = feats @ proj_matrix
+            noise_std = 0.01
+            feats = feats + torch.randn_like(feats) * noise_std
         feats = feats.to(dtype=torch.float32)
         return {
             "file_path": file_path,
@@ -47,21 +47,6 @@ def create_feature_loader(base_path_template: str, epoch: int = 0):
         }
 
     return feature_loader
-
-def mask_tokens(input_ids, tokenizer, mlm_probability=0.15, protected_mask=None):
-    labels = input_ids.clone()
-    probability_matrix = torch.full(labels.shape, mlm_probability)
-    special_tokens_mask = [
-        tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True)
-        for val in labels.tolist()
-    ]
-    probability_matrix.masked_fill_(torch.tensor(special_tokens_mask, dtype=torch.bool), value=0.0)
-    masked_indices = torch.bernoulli(probability_matrix).bool()
-    if protected_mask is not None:
-        masked_indices &= ~protected_mask
-    labels[~masked_indices] = -100
-    input_ids[masked_indices] = tokenizer.mask_token_id
-    return input_ids, labels
 
 def get_cast_dtype(precision: str):
     cast_dtype = None
@@ -100,22 +85,21 @@ def train_one_epoch(
     lr_scheduler,
     device_id,
     wandb,
+    cls_loss_fns,
 ):
     # setup loader
     num_batches_per_epoch = train_loader.num_batches
     print("Number of batches in training dataset: ", num_batches_per_epoch)
-    total_training_steps = num_batches_per_epoch * args.num_epochs
 
-    autocast = get_autocast(
-        args.precision, cache_enabled=(not args.fsdp)
-    )  # if fsdp, disable cache to save memory
+    autocast = get_autocast(args.precision)
     cast_dtype = get_cast_dtype(args.precision)
 
     # setup model
     media_token_id = tokenizer("<image>", add_special_tokens=False)["input_ids"][-1]
     endofchunk_token_id = tokenizer("<|endofchunk|>", add_special_tokens=False)["input_ids"][-1]
 
-    
+    organ_loss_fn, diag_loss_fn = cls_loss_fns
+
     model.train()
 
     # setup logging
@@ -124,44 +108,66 @@ def train_one_epoch(
     end = time.time()
 
     # loop through dataloader
-    for num_steps, batch in tqdm(
+    for local_step, batch in tqdm(
         enumerate(train_loader),
         disable=args.rank != 0,
-        total=total_training_steps,
-        initial=(epoch * num_batches_per_epoch),
+        total=num_batches_per_epoch,
     ):
-        global_step = num_steps + epoch * num_batches_per_epoch
+        global_step = epoch * num_batches_per_epoch + local_step
 
         images = batch["images"].to(device_id, dtype=cast_dtype, non_blocking=True)
         input_ids = batch["input_ids"].to(device_id, non_blocking=True)
+        if args.rank == 0 and epoch == 0 and local_step == 0:
+            print("Sample input_ids (decoded):")
+            decoded = tokenizer.batch_decode(input_ids[:8], skip_special_tokens=False)
+            for line in decoded:
+                print(line)
         attention_mask = batch["attention_mask"].to(device_id, non_blocking=True)
         labels = batch["labels"].to(device_id, non_blocking=True)
 
-        mlm_input_ids, mlm_labels = mask_tokens(
-            input_ids.clone(),
-            tokenizer,
-            mlm_probability=args.mlm_probability,
-            protected_mask=batch["image_token_mask"].to(device_id)
-        )
-
         with autocast():
-            # AR loss
-            ar_loss = model(
+            output = model(
                 vision_x=images,
                 lang_x=input_ids,
                 attention_mask=attention_mask,
                 labels=labels,
-            )[0]
+            )
+            loss = output["loss"]
 
-            # MLM loss
-            mlm_loss = model(
-                vision_x=images,
-                lang_x=mlm_input_ids,
-                attention_mask=attention_mask,
-                labels=mlm_labels,
-            )[0]
+            organ_label = batch["organ_label"].to(device_id)
+            diagnosis_label = batch["diagnosis_label"].to(device_id)
 
-            loss = ar_loss + args.mlm_loss_weight * mlm_loss
+            loss_cls1 = torch.tensor(0.0, device=device_id)
+            loss_cls2 = torch.tensor(0.0, device=device_id)
+
+            if "cls_logits1" in output:
+                cls_logits1 = output["cls_logits1"]
+                loss_cls1 = organ_loss_fn(cls_logits1, organ_label)
+                loss = loss + loss_cls1
+
+            if "cls_logits2" in output:
+                cls_logits2 = output["cls_logits2"]
+                loss_cls2 = diag_loss_fn(cls_logits2, diagnosis_label)
+                loss = loss + loss_cls2
+            elif args.cls == "diagnosisnoclass":
+                # Use the last hidden state from the output
+                if output.get("hidden_states") is not None:
+                    hidden_states = output["hidden_states"][-1]  # shape (B, T, D)
+                    cls_logits2 = model.cls_head2(hidden_states[:, -1, :])  # Use the last token representation
+                    loss_cls2 = diag_loss_fn(cls_logits2, diagnosis_label)
+                    loss = loss + loss_cls2
+                    output["cls_logits2"] = cls_logits2  # for logging
+                else:
+                    print("Warning: output.hidden_states is None, skipping diagnosisnoclass loss.")
+
+            if args.lambda_gate > 0:
+                #print("[DEBUG] Applying gate regularization")
+                all_attn_gates = [
+                    layer.attn_gate for layer in model.module.lang_encoder.gated_cross_attn_layers
+                    if layer is not None
+                ]
+                gate_reg_loss = -torch.stack([gate.tanh() for gate in all_attn_gates]).mean()
+                loss = loss + args.lambda_gate * gate_reg_loss
 
             # if loss is nan, skip this batch
             if torch.isnan(loss):
@@ -173,46 +179,27 @@ def train_one_epoch(
                 continue
 
         divided_loss = loss / args.gradient_accumulation_steps
-        (divided_loss * args.loss_multiplier).backward()
+        (divided_loss).backward()
 
-        if (not args.freeze_lm_embeddings) and (
-            not args.fsdp or args.fsdp_use_orig_params
-        ):
-            # Mask gradients for input embeddings s.t. we only update the added tokens <image> , <|endofchunk|> and <|endofquestion|>
-            if args.fsdp:
-                embed_grad = model.lang_encoder.get_input_embeddings().weight.grad
-            else:
-                embed_grad = (
-                    model.module.lang_encoder.get_input_embeddings().weight.grad
-                )
-            if embed_grad is not None: # Added an if condition to check if embed_grad is None
-                zero_mask = torch.zeros_like(embed_grad)
-                zero_mask[media_token_id] = torch.ones_like(zero_mask[media_token_id])
-                zero_mask[endofchunk_token_id] = torch.ones_like(zero_mask[endofchunk_token_id])
-                if args.fsdp:
-                    model.lang_encoder.get_input_embeddings().weight.grad = (
-                        embed_grad * zero_mask
-                    )
-                else:
-                    model.module.lang_encoder.get_input_embeddings().weight.grad = (
-                        embed_grad * zero_mask
-                    )
+        if args.rank == 0 and epoch == 0 and local_step == 0:
+            print("\nTrainable layers with non-zero gradients:")
+            for name, param in model.named_parameters():
+                if param.requires_grad and param.grad is not None and param.grad.abs().sum() > 0:
+                    print(f"✓ {name}")
+
+        if not args.freeze_lm_embeddings:
+            embed_grad = model.module.lang_encoder.get_input_embeddings().weight.grad
+            zero_mask = torch.zeros_like(embed_grad)
+            zero_mask[media_token_id] = torch.ones_like(zero_mask[media_token_id])
+            zero_mask[endofchunk_token_id] = torch.ones_like(zero_mask[endofchunk_token_id])
+            model.module.lang_encoder.get_input_embeddings().weight.grad = embed_grad * zero_mask
 
         # clip gradient norm
-        if args.fsdp:
-            """
-            The way we clip gradients with FSDP is different than the non-FSDP case,
-            because during FSDP, gradient norms are computed over certain submodules,
-            rather than the entire model.
-            At least for OPT-125M, this didn't seem to make a difference in performance.
-            """
-            model.clip_grad_norm_(1.0)
-        else:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
         # step optimizer and log
-        if (((num_steps + 1) % args.gradient_accumulation_steps) == 0) or (
-            num_steps == num_batches_per_epoch - 1
+        if (((local_step + 1) % args.gradient_accumulation_steps) == 0) or (
+            local_step == num_batches_per_epoch - 1
         ):
             optimizer.step()
             lr_scheduler.step()
@@ -235,34 +222,36 @@ def train_one_epoch(
                     * args.batch_size
                     / step_time_m.val
                 )
-                wandb.log(
-                    {
-                        "data_time": data_time_m.avg,
-                        "step_time": step_time_m.avg,
-                        "epoch": epoch,
-                        "samples_per_second": samples_per_second,
-                        "samples_per_second_per_gpu": samples_per_second_per_gpu,
-                        "lr": optimizer.param_groups[0]["lr"],
-                        "ar_loss": ar_loss.item(),
-                        "mlm_loss": mlm_loss.item(),
-                    },
-                    commit=False,
-                )
+                wandb_log = {
+                    "data_time": data_time_m.avg,
+                    "step_time": step_time_m.avg,
+                    "epoch": epoch,
+                    "samples_per_second_per_gpu": samples_per_second_per_gpu,
+                    "lr_decay": optimizer.param_groups[0]["lr"],
+                    "lr_no_decay": optimizer.param_groups[1]["lr"],
+                    "lr_gate": optimizer.param_groups[2]["lr"],
+                    "global_step": global_step,
+                    "ar_loss": output["loss"].item(),
+                    "total_loss": loss.item(),
+                    }
+
+                if "cls_logits1" in output:
+                    wandb_log["loss_cls_organ"] = loss_cls1.item()
+                if "cls_logits2" in output:
+                    wandb_log["loss_cls_diag"] = loss_cls2.item()
+
+                wandb.log(wandb_log, commit=True)
                 step_time_m.reset()
                 data_time_m.reset()
-
-                wandb.log(
-                    {
-                        "loss": loss.item(),
-                        "global_step": global_step,
-                    },
-                    commit=True,
-                )
+                if args.rank == 0:
+                    print(
+                        f"Step {local_step+1}/{num_batches_per_epoch} of epoch {epoch+1}/{args.num_epochs} complete. Loss: {loss.item():.3f}"
+                        )
 
         # Log loss to console
-        if ((num_steps + 1) % args.logging_steps == 0) and args.rank == 0:
+        if ((local_step + 1) % args.logging_steps == 0) and args.rank == 0:
             print(
-                f"Step {num_steps+1}/{num_batches_per_epoch} of epoch {epoch+1}/{args.num_epochs} complete. AR Loss: {ar_loss.item():.3f}, MLM Loss: {mlm_loss.item():.3f}"
+                f"Step {local_step+1}/{num_batches_per_epoch} of epoch {epoch+1}/{args.num_epochs} complete. Loss: {loss.item():.3f}"
             )
 
 
@@ -296,8 +285,6 @@ def filter_state_dict_to_trainable(model, state_dict):
         name,
         p,
     ) in model.named_parameters():  # won't work for fsdp + use_orig_params=False
-        if "fsdp" in name:
-            continue
         if "embed" in name or isinstance(p, torch.nn.Embedding):
             continue
         if not p.requires_grad:
@@ -326,23 +313,11 @@ def save_checkpoint(model, optimizer, lr_scheduler, epoch, args):
     """
     Save training checkpoint with model, optimizer, and lr_scheduler state.
     """
-    if args.fsdp:
-        FSDP.set_state_dict_type(
-            model,
-            StateDictType.FULL_STATE_DICT,
-            FullStateDictConfig(rank0_only=True, offload_to_cpu=True),
-            FullOptimStateDictConfig(rank0_only=True),
-        )
-        model_state = model.state_dict()
-        optim_state = FSDP.optim_state_dict(model, optimizer, group=args.my_group)
-
-    else:
-        model_state = model.state_dict()
-        optim_state = optimizer.state_dict()
+    model_state = model.state_dict()
+    optim_state = optimizer.state_dict()
 
     if args.rank == 0:
-        if not (args.fsdp and not args.fsdp_use_orig_params):
-            model_state = filter_state_dict_to_trainable(model, model_state)
+        model_state = filter_state_dict_to_trainable(model, model_state)
 
         if not os.path.exists(args.run_name):
             os.makedirs(args.run_name)

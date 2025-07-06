@@ -1,18 +1,24 @@
-# Python
+# Ignore wandb folder
+wandb/
+
+# Ignore all train*.sh files
+train*.sh
+
+# Ignore all data_log*.jsonl files
+data_log*.jsonl
+
+# Ignore all XATTN* folders in the repo root
+/XATTN*/
+
+# Ignore __pycache__ folders everywhere
 __pycache__/
-*.py[cod]
-*.egg-info/
-*.egg
-*.pyo
-build/
-dist/
-.env
-.venv
-*.sqlite3
 
-# VSCode
-.vscode/
+# Ignore pathoMozhi/pathoMozhi/eval folder
+pathoMozhi/pathoMozhi/eval/
+pathoMozhi/pathoMozhi/bestModel/
 
-# Conda
-*.lock
-*.yaml
+# Ignore pathoMozhi/pathoMozhi/train/debug.py
+pathoMozhi/pathoMozhi/train/debug.py
+
+# Ignore Chcekpoint
+pathMozhi/pathoMozhi/best_perceiver_classifier.pt

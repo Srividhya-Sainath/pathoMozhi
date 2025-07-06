@@ -17,6 +17,7 @@ def create_model_and_transforms(
     decoder_layers_attr_name: str = None,
     freeze_lm_embeddings: bool = False,
     cache_dir: Optional[str] = None,
+    cls_type="both",
     **flamingo_kwargs,
 ):
     """
@@ -45,10 +46,12 @@ def create_model_and_transforms(
         use_fast=True
     )
 
-    SPECIAL_TASK_TOKENS = [
-        "<image>",
-        "<|endofchunk|>",
-        ]
+    SPECIAL_TASK_TOKENS = ["<image>", "<|endofchunk|>"]
+    if cls_type in ["organ", "both"]:
+        SPECIAL_TASK_TOKENS.append("<cls1>")
+    if cls_type in ["diagnosis", "both"]:
+        SPECIAL_TASK_TOKENS.append("<cls2>")
+
     text_tokenizer.add_special_tokens(
         {"additional_special_tokens": SPECIAL_TASK_TOKENS}
     )
@@ -63,6 +66,7 @@ def create_model_and_transforms(
         local_files_only=use_local_files,
         trust_remote_code=True,
         cache_dir=cache_dir,
+        use_safetensors=True
     )
 
     # hacks for MPT-1B, which doesn't have a get_input_embeddings method
@@ -93,7 +97,9 @@ def create_model_and_transforms(
         text_tokenizer.encode("<|endofchunk|>")[-1],
         text_tokenizer.encode("<image>")[-1],
         vis_dim= 768,
+        tokenizer=text_tokenizer,
         cross_attn_every_n_layers=cross_attn_every_n_layers,
+        cls_type=cls_type,
         **flamingo_kwargs,
     )
 
@@ -112,8 +118,8 @@ def create_model_and_transforms(
 
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    #print(f"Flamingo model initialized with {trainable_params} trainable parameters")
-    #print(f"Total trainable parameters: {trainable_params/1e6:.2f}M") 
+    print(f"Flamingo model initialized with {trainable_params} trainable parameters")
+    print(f"Total trainable parameters: {trainable_params/1e6:.2f}M") 
 
     return model,text_tokenizer
 
@@ -138,5 +144,4 @@ __KNOWN_DECODER_LAYERS_ATTR_NAMES = {
     "mpt": "transformer.blocks",
     "mosaicgpt": "transformer.blocks",
     "biogptforcausallm": "biogpt.layers",
-    "gemma3forconditionalgeneration": "model.language_model.layers",
 }
