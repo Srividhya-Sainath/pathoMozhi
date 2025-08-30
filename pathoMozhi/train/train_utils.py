@@ -85,7 +85,6 @@ def train_one_epoch(
     lr_scheduler,
     device_id,
     wandb,
-    cls_loss_fns,
 ):
     # setup loader
     num_batches_per_epoch = train_loader.num_batches
@@ -97,8 +96,6 @@ def train_one_epoch(
     # setup model
     media_token_id = tokenizer("<image>", add_special_tokens=False)["input_ids"][-1]
     endofchunk_token_id = tokenizer("<|endofchunk|>", add_special_tokens=False)["input_ids"][-1]
-
-    organ_loss_fn, diag_loss_fn = cls_loss_fns
 
     model.train()
 
@@ -134,42 +131,6 @@ def train_one_epoch(
             )
             loss = output["loss"]
 
-            organ_label = batch["organ_label"].to(device_id)
-            diagnosis_label = batch["diagnosis_label"].to(device_id)
-
-            loss_cls1 = torch.tensor(0.0, device=device_id)
-            loss_cls2 = torch.tensor(0.0, device=device_id)
-
-            if "cls_logits1" in output:
-                cls_logits1 = output["cls_logits1"]
-                loss_cls1 = organ_loss_fn(cls_logits1, organ_label)
-                loss = loss + loss_cls1
-
-            if "cls_logits2" in output:
-                cls_logits2 = output["cls_logits2"]
-                loss_cls2 = diag_loss_fn(cls_logits2, diagnosis_label)
-                loss = loss + loss_cls2
-            elif args.cls == "diagnosisnoclass":
-                # Use the last hidden state from the output
-                if output.get("hidden_states") is not None:
-                    hidden_states = output["hidden_states"][-1]  # shape (B, T, D)
-                    cls_logits2 = model.cls_head2(hidden_states[:, -1, :])  # Use the last token representation
-                    loss_cls2 = diag_loss_fn(cls_logits2, diagnosis_label)
-                    loss = loss + loss_cls2
-                    output["cls_logits2"] = cls_logits2  # for logging
-                else:
-                    print("Warning: output.hidden_states is None, skipping diagnosisnoclass loss.")
-            elif args.cls == "diagnosisAttn":
-                if output.get("hidden_states") is not None:
-                    hidden_states = output["hidden_states"][-1]
-                    attn_weights = model.attn_pool(hidden_states).softmax(dim=1)
-                    pooled = (hidden_states * attn_weights).sum(dim=1)
-                    cls_logits2 = model.cls_head2(pooled)
-                    loss_cls2 = diag_loss_fn(cls_logits2, diagnosis_label)
-                    loss = loss + loss_cls2
-                    output["cls_logits2"] = cls_logits2  # for logging
-                else:
-                    print("Warning: output.hidden_states is None, skipping diagnosisAttn loss.")
             if args.lambda_gate > 0:
                 #print("[DEBUG] Applying gate regularization")
                 all_attn_gates = [
@@ -181,21 +142,11 @@ def train_one_epoch(
 
             # if loss is nan, skip this batch
             if torch.isnan(loss):
-                print("loss is nan, skipping this batch")
-                print("input_ids: ", tokenizer.batch_decode(input_ids))
-                print("labels: ", labels)
-                print("images: ", images)
                 optimizer.zero_grad(set_to_none=True)
                 continue
 
         divided_loss = loss / args.gradient_accumulation_steps
         (divided_loss).backward()
-
-        if args.rank == 0 and epoch == 0 and local_step == 0:
-            print("\nTrainable layers with non-zero gradients:")
-            for name, param in model.named_parameters():
-                if param.requires_grad and param.grad is not None and param.grad.abs().sum() > 0:
-                    print(f"✓ {name}")
 
         if not args.freeze_lm_embeddings:
             embed_grad = model.module.lang_encoder.get_input_embeddings().weight.grad
@@ -221,12 +172,7 @@ def train_one_epoch(
 
             # rank 0 logging
             if args.rank == 0 and args.report_to_wandb:
-                samples_per_second = (
-                    args.gradient_accumulation_steps
-                    * args.batch_size
-                    * args.world_size
-                    / step_time_m.val
-                )
+
                 samples_per_second_per_gpu = (
                     args.gradient_accumulation_steps
                     * args.batch_size
@@ -242,13 +188,7 @@ def train_one_epoch(
                     "lr_gate": optimizer.param_groups[2]["lr"],
                     "global_step": global_step,
                     "ar_loss": output["loss"].item(),
-                    "total_loss": loss.item(),
                     }
-
-                if "cls_logits1" in output:
-                    wandb_log["loss_cls_organ"] = loss_cls1.item()
-                if "cls_logits2" in output:
-                    wandb_log["loss_cls_diag"] = loss_cls2.item()
 
                 wandb.log(wandb_log, commit=True)
                 step_time_m.reset()
