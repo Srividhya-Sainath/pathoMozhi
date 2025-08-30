@@ -6,23 +6,16 @@ from data_utils import *
 from train_utils import get_cast_dtype
 
 class PathDataset(Dataset):
-    def __init__(self, jsonl_file, tokenizer, feature_loader, epoch=0, max_tokens=312, cls_type="both"):
+    def __init__(self, jsonl_file, tokenizer, feature_loader, epoch=0, max_tokens=312):
         self.tokenizer = tokenizer
         self.feature_loader = feature_loader
         self.epoch = epoch
         self.max_tokens = max_tokens
-        self.cls_type = cls_type
-        self.entries = self._load_entries(jsonl_file)
-        self.organ2id = self._build_vocab(self.entries, key="organ")
-        self.diag2id = self._build_vocab(self.entries, key="diagnosis")
 
     def _load_entries(self, jsonl_file):
         with open(jsonl_file, "r") as f:
             return [json.loads(line) for line in f]
-        
-    def _build_vocab(self, entries, key):
-        values = sorted(set(entry[key] for entry in entries))
-        return {v: i for i, v in enumerate(values)}
+    
 
     def __len__(self):
         return len(self.entries)
@@ -31,14 +24,7 @@ class PathDataset(Dataset):
         entry = self.entries[idx]
         report_text = entry.get("result", "")
         file_path = entry["file_path"]
-        if self.cls_type == "both":
-            prompt = "<cls1> <cls2> <image> Final Diagnosis:"
-        elif self.cls_type == "organ":
-            prompt = "<cls1> <image> Final Diagnosis:"
-        elif self.cls_type == "diagnosis":
-            prompt = "<cls2> <image> Final Diagnosis:"
-        else:
-            prompt = "<image> Final Diagnosis:"
+        prompt = "<image> Final Diagnosis:"
         text = f"{report_text} <|endofchunk|>"
 
         # Logging the file_path and raw_text
@@ -62,18 +48,13 @@ class PathDataset(Dataset):
         labels = input_ids.clone()
         labels[input_ids == self.tokenizer.pad_token_id] = -100
         labels[input_ids == self.tokenizer.convert_tokens_to_ids("<image>")] = -100
-        if self.cls_type in ["organ", "both"]:
-            labels[input_ids == self.tokenizer.convert_tokens_to_ids("<cls1>")] = -100
-        if self.cls_type in ["diagnosis", "both"]:
-            labels[input_ids == self.tokenizer.convert_tokens_to_ids("<cls2>")] = -100
 
         assert self.feature_loader is not None, f"Feature loader is None for file {file_path}"
         feature_dict = self.feature_loader(file_path)
         features = feature_dict["feature"]
         if features.ndim == 2:
             features = features.unsqueeze(0)
-        organ_label = self.organ2id[entry["organ"]]
-        diagnosis_label = self.diag2id[entry["diagnosis"]]
+
         return {
             "file_path": file_path,
             "raw_text": text,
@@ -81,8 +62,6 @@ class PathDataset(Dataset):
             "attention_mask": attention_mask,
             "labels": labels,
             "features": features,
-            "organ_label": organ_label,
-            "diagnosis_label": diagnosis_label,
         }
 
 def collate_fn(batch, cast_dtype=None):
@@ -96,8 +75,6 @@ def collate_fn(batch, cast_dtype=None):
         "attention_mask": torch.stack([sample["attention_mask"] for sample in batch]),
         "labels": torch.stack([sample["labels"] for sample in batch]),
         "images": images,
-        "organ_label": torch.tensor([sample["organ_label"] for sample in batch], dtype=torch.long),
-        "diagnosis_label": torch.tensor([sample["diagnosis_label"] for sample in batch], dtype=torch.long),
     }
 
 def build_dataset(args, tokenizer, feature_loader, epoch=0, floor=False):
@@ -109,7 +86,6 @@ def build_dataset(args, tokenizer, feature_loader, epoch=0, floor=False):
         tokenizer=tokenizer,
         feature_loader=feature_loader,
         max_tokens=args.max_tokens,
-        cls_type=args.cls,
         epoch=epoch,  # Pass epoch to dataset
     )
     dataset.epoch = epoch  # Ensure epoch is set for proper logging
