@@ -17,7 +17,6 @@ def create_model_and_transforms(
     decoder_layers_attr_name: str = None,
     freeze_lm_embeddings: bool = False,
     cache_dir: Optional[str] = None,
-    cls_type="both",
     **flamingo_kwargs,
 ):
     """
@@ -47,10 +46,6 @@ def create_model_and_transforms(
     )
 
     SPECIAL_TASK_TOKENS = ["<image>", "<|endofchunk|>"]
-    if cls_type in ["organ", "both"]:
-        SPECIAL_TASK_TOKENS.append("<cls1>")
-    if cls_type in ["diagnosis", "both"]:
-        SPECIAL_TASK_TOKENS.append("<cls2>")
 
     text_tokenizer.add_special_tokens(
         {"additional_special_tokens": SPECIAL_TASK_TOKENS}
@@ -82,7 +77,6 @@ def create_model_and_transforms(
         extend_instance(lang_encoder, EmbeddingFnMixin)
 
     # convert LM to FlamingoLM
-    # STEP2 --> Yeh samajna hai
     extend_instance(lang_encoder, FlamingoLMMixin)
     # Yahaan hum dekhte hain ki decoder blocks kahaan hain, aur uske hisaab se hum wahaan cross-attention layers add karte hain
     if decoder_layers_attr_name is None:
@@ -99,7 +93,6 @@ def create_model_and_transforms(
         vis_dim= 768,
         tokenizer=text_tokenizer,
         cross_attn_every_n_layers=cross_attn_every_n_layers,
-        cls_type=cls_type,
         **flamingo_kwargs,
     )
 
