@@ -52,8 +52,7 @@ def main():
     parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--logging_steps", type=int, default=100)
     parser.add_argument("--offline", action="store_true")
-    parser.add_argument("--lambda_gate", type=float, default=0.1, help="Weight for the gate loss, if applicable.")
-    parser.add_argument("--cls", type=str, default="both", choices=["None", "organ", "diagnosis", "both", "diagnosisnoclass", "diagnosisAttn"], help="Type of classification to include in training.")
+    parser.add_argument("--lambda_gate", type=float, default=0.0, help="Weight for the gate loss, if applicable.")
 
     # data
     parser.add_argument("--vision_features", type=str, required=True)
@@ -83,7 +82,6 @@ def main():
     args = parser.parse_args()
     args.cls = args.cls.lower()
 
-    # Validate that --vision_features includes {epoch} for dynamic path resolution
     if "{epoch}" not in args.vision_features:
         raise ValueError("The --vision_features argument must include '{epoch}' for epoch-based dynamic path resolution.")
 
@@ -97,8 +95,6 @@ def main():
     args.local_rank, args.rank, args.world_size = world_info_from_env()
     device_id = init_distributed_device(args)
     random_seed(args.seed, args.rank)
-
-    # Initialize model and tokenizer
     model, tokenizer = create_model_and_transforms(
         args.lm_path,
         args.tokenizer_path if args.tokenizer_path else args.lm_path,
@@ -106,10 +102,7 @@ def main():
         use_local_files=args.offline,
         gradient_checkpointing=args.gradient_checkpointing,
         freeze_lm_embeddings=args.freeze_lm_embeddings,
-        cls_type=args.cls,
     )
-
-    # Print all model parameter names (only once, for rank 0)
     if args.rank == 0:
         print("\n[Model Parameter Names - In Perceiver Resampler]")
         for name, _ in model.named_parameters():
@@ -139,7 +132,6 @@ def main():
         print(f"Start running training on rank {args.rank}.")
         print(f"Initializing distributed training with {args.world_size} GPUs.")
 
-    # Initialize wandb
     if args.rank == 0 and args.report_to_wandb:
         wandb.init(
             project=args.wandb_project,
@@ -148,7 +140,6 @@ def main():
             config=vars(args),
         )
 
-    # Optional checkpoint load
     resume_from_epoch = 0
     if args.resume_from_checkpoint is not None:
         if args.rank == 0:
@@ -159,11 +150,9 @@ def main():
         resume_from_epoch = checkpoint["epoch"] + 1
         model.load_state_dict(msd, strict=False)
 
-    # DDP setup
     model = model.to(device_id)
     ddp_model = DDP(model, device_ids=[device_id])
 
-    # Gradient checkpointing
     if args.gradient_checkpointing:
         from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
             checkpoint_wrapper, CheckpointImpl, apply_activation_checkpointing
@@ -181,8 +170,7 @@ def main():
             check_fn=lambda m: getattr(m, "_use_gradient_checkpointing", False),
         )
 
-    # Optimizer setup
-    def get_grouped_params(named_params, base_lr, wd, gate_lr=None, gate_lr_mult=5.0):
+    def get_grouped_params(named_params, base_lr, wd, gate_lr=None, gate_lr_mult=1.0):
         decay, no_decay, gate = [], [], []
         for n, p in named_params:
             if not p.requires_grad:
@@ -210,7 +198,6 @@ def main():
         betas=(0.9, 0.999)
     )
 
-    # Debug: print parameter groupings to verify correct LR assignment
     if args.rank == 0:
         for i, group in enumerate(optimizer.param_groups):
             print(f"\n[Param Group {i}] LR: {group['lr']}, Weight Decay: {group['weight_decay']}")
@@ -232,11 +219,7 @@ def main():
         except ValueError:
             print("WARNING: Could not load optimizer state due to mismatch.")
 
-    # LR scheduler
     import math
-    # total_training_steps = (
-    #     (args.train_num_samples) // (args.batch_size * args.world_size)
-    # ) * args.num_epochs
     global_batch_size = args.batch_size * args.world_size
     steps_per_epoch = math.ceil(args.train_num_samples / global_batch_size)
     total_training_steps = steps_per_epoch * args.num_epochs
@@ -260,7 +243,6 @@ def main():
     if args.resume_from_checkpoint is not None and "lr_scheduler_state_dict" in checkpoint:
         lr_scheduler.load_state_dict(checkpoint["lr_scheduler_state_dict"])
 
-    # Training loop
     ddp_model.train()
 
     for epoch in range(resume_from_epoch, args.num_epochs):
@@ -270,34 +252,6 @@ def main():
             print(f"[Epoch {epoch}] Using vision feature path: {args.vision_features.format(epoch=epoch)}")
         train_dataset.set_epoch(epoch)
         train_loader = train_dataset.dataloader
-
-        from collections import Counter
-        dataset = train_loader.dataset
-        organ_counts = Counter(entry["organ"] for entry in dataset.entries)
-        diagnosis_counts = Counter(entry["diagnosis"] for entry in dataset.entries)
-        # Print class distribution
-        if args.rank == 0:
-            print("\n[Organ Class Distribution]")
-            for organ, idx in sorted(dataset.organ2id.items(), key=lambda x: x[1]):
-                count = organ_counts.get(organ, 0)
-                print(f"  {idx}: {organ:<15} -> {count} samples")
-
-            print("\n[Diagnosis Group Class Distribution]")
-            for diag, idx in sorted(dataset.diag2id.items(), key=lambda x: x[1]):
-                count = diagnosis_counts.get(diag, 0)
-                print(f"  {idx}: {diag:<25} -> {count} samples")
-        num_organ_classes = len(dataset.organ2id)
-        num_diag_classes = len(dataset.diag2id)
-        organ_weights = torch.tensor([1.0 / organ_counts[org] for org, _ in sorted(dataset.organ2id.items(), key=lambda x: x[1])])
-        diag_weights = torch.tensor([1.0 / diagnosis_counts[diag] for diag, _ in sorted(dataset.diag2id.items(), key=lambda x: x[1])])
-        organ_weights = organ_weights / organ_weights.sum() * num_organ_classes
-        diag_weights = diag_weights / diag_weights.sum() * num_diag_classes
-        organ_loss_fn, diag_loss_fn = None, None
-        if args.cls in ["organ", "both"]:
-            organ_loss_fn = torch.nn.CrossEntropyLoss(weight=organ_weights)
-        if args.cls in ["diagnosis", "both", "diagnosisnoclass", "diagnosisAttn"]:
-            diag_loss_fn = torch.nn.CrossEntropyLoss(weight=diag_weights)
-        cls_loss_fns = (organ_loss_fn, diag_loss_fn)
 
         train_one_epoch(
             args=args,
@@ -309,13 +263,9 @@ def main():
             train_loader=train_loader,
             device_id=device_id,
             wandb=wandb,
-            cls_loss_fns=cls_loss_fns,
         )
         save_checkpoint(ddp_model, optimizer, lr_scheduler, epoch, args)
-
-    # Save final checkpoint
     save_checkpoint(ddp_model, optimizer, lr_scheduler, epoch, args)
-
 
 if __name__ == "__main__":
     main()
