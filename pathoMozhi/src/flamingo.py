@@ -12,9 +12,6 @@ class Flamingo(nn.Module):
         tokenizer,
         cross_attn_every_n_layers: int = 1,
         gradient_checkpointing: bool = False,
-        num_organ_classes: int = 9,
-        num_diagnosis_classes: int = 38,
-        cls_type="both",
     ):
         """
         Args:
@@ -33,16 +30,8 @@ class Flamingo(nn.Module):
         if hasattr(lang_encoder.config, "d_model"):
             self.lang_dim = lang_encoder.config.d_model  # mpt uses d_model
         else:
-            #self.lang_dim = lang_encoder.config.hidden_size
             self.lang_dim = lang_encoder.get_input_embeddings().embedding_dim
-        self.cls_type = cls_type
-        if cls_type in ["organ", "both"]:
-            self.cls_head1 = nn.Linear(self.lang_dim, num_organ_classes)
-        if cls_type in ["diagnosis", "both", "diagnosisnoclass"]:
-            self.cls_head2 = nn.Linear(self.lang_dim, num_diagnosis_classes)
-        if cls_type == "diagnosisAttn":
-            self.attn_pool = nn.Linear(self.lang_dim, 1)
-            self.cls_head2 = nn.Linear(self.lang_dim, num_diagnosis_classes)
+
         self.perceiver = PerceiverResampler(dim=self.vis_dim)
         self.lang_encoder = lang_encoder
         self.lang_encoder.init_flamingo(
@@ -106,43 +95,6 @@ class Flamingo(nn.Module):
             past_key_values=past_key_values,
             use_cache=use_cache,
         )
-
-        # Optional: get final hidden states for classifier heads
-        if output.hidden_states is not None:
-            hidden_states = output.hidden_states[-1]  # (B, T, D)
-            B = hidden_states.size(0)
-
-            # Organ classification
-            if self.cls_type in ["organ", "both"]:
-                cls1_id = self.tokenizer.convert_tokens_to_ids("<cls1>")
-                cls1_mask = (lang_x == cls1_id)
-                if cls1_mask.sum(dim=1).min() < 1:
-                    raise ValueError("Expected <cls1> token per sample for organ classification.")
-                cls_feats1 = hidden_states[cls1_mask].view(B, -1)
-                output["cls_logits1"] = self.cls_head1(cls_feats1)
-
-            # Diagnosis classification (various strategies)
-            if self.cls_type == "diagnosisnoclass":
-                # Use last token embedding
-                cls_feats2 = hidden_states[:, -1, :]  # (B, D)
-                output["cls_logits2"] = self.cls_head2(cls_feats2)
-
-            elif self.cls_type in ["diagnosis", "both"]:
-                # Use <cls2> token representation
-                cls2_id = self.tokenizer.convert_tokens_to_ids("<cls2>")
-                cls2_mask = (lang_x == cls2_id)
-                if cls2_mask.sum(dim=1).min() < 1:
-                    raise ValueError("Expected <cls2> token per sample for diagnosis classification.")
-                cls_feats2 = hidden_states[cls2_mask].view(B, -1)
-                output["cls_logits2"] = self.cls_head2(cls_feats2)
-
-            elif self.cls_type == "diagnosisAttn":
-                # Use attention pooling over hidden states
-                attn_weights = self.attn_pool(hidden_states).softmax(dim=1)  # (B, T, 1)
-                pooled = (hidden_states * attn_weights).sum(dim=1)           # (B, D)
-                output["cls_logits2"] = self.cls_head2(pooled)
-        else:
-            print("output.hidden_states is None")
 
         if clear_conditioned_layers:
             self.lang_encoder.clear_conditioned_layers()
