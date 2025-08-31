@@ -29,6 +29,10 @@ Rather than using raw image pixels, we extract **patch-level features** using th
 - **Custom parameter grouping**: Gated parameters are trained with a **separate learning rate** (`gate_lr`) using a custom optimizer grouping strategy.
 
 ---
+## 📚 References
+
+[1] Galkowicz et al. "PRISM: A Foundation Model for Pathology", 2024  
+[2] Dolezal et al. "HistoGPT: Unifying Histology and Language with Generative Modeling", 2023
 
 ## 📦 Installation
 
