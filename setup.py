@@ -9,12 +9,14 @@ if __name__ == "__main__":
     REQUIREMENTS = [
         "einops",
         "einops-exts",
-        "transformers>=4.28.1",
+        "transformers>=4.28.1,<4.39",
         "torch>=2.1.2",
         "torchvision>=0.16.2",
         "triton==2.1.0",
         "numpy==1.26.0",
         "pillow",
+        "h5py",
+        "sacremoses",
     ]
 
     TRAINING = [
