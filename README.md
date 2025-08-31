@@ -9,7 +9,7 @@
 
 ## 🚀 Overview
 
-**PathoMozhi** is a Flamingo-inspired vision-language model tailored for digital pathology. It integrates a pretrained language model (BioGPT-Large) with visual context from whole-slide image (WSI) features using gated cross-attention layers.  
+**PathoMozhi** is a Flamingo-inspired [4] vision-language model tailored for digital pathology. It integrates a pretrained language model (BioGPT-Large) with visual context from whole-slide image (WSI) features using gated cross-attention layers.  
 
 ---
 
@@ -17,11 +17,11 @@
 
 ### 2.1 Flamingo-style VLM inspired by PRISM and HistoGPT
 
-We implement a vision-language architecture inspired by recent models such as **PRISM** [1] and **HistoGPT** [2]. A pretrained language model (**BioGPT-Large**) is augmented with cross-attention layers to receive context from WSI-derived image features.
+We implement a vision-language architecture inspired by recent models such as **PRISM** [1] and **HistoGPT** [2]. A pretrained language model (**BioGPT-Large**) [5] is augmented with cross-attention layers to receive context from WSI-derived image features.
 
 ### 2.2 Patch-level MIL using CONCHv1.5 features
 
-Rather than using raw image pixels, we extract **patch-level features** using the **CONCHv1.5** encoder. These are processed in a **multiple instance learning (MIL)** setup before being passed to the language model.
+Rather than using raw image pixels, we extract **patch-level features** using the **CONCHv1.5** [3] encoder. These are processed in a **multiple instance learning (MIL)** setup before being passed to the language model.
 
 ### 2.3 Gated cross-attention + decoupled optimization
 
@@ -33,6 +33,9 @@ Rather than using raw image pixels, we extract **patch-level features** using th
 
 [1] Galkowicz et al. "PRISM: A Foundation Model for Pathology", 2024  
 [2] Dolezal et al. "HistoGPT: Unifying Histology and Language with Generative Modeling", 2023
+[3] Ding, T. et al. "Multimodal Whole Slide Foundation Model for Pathology", 2024
+[4] Alayrac, J.-B. et al. "Flamingo: a Visual Language Model for Few-Shot Learning", 2022
+[5] Renqian, L. et al. "BioGPT: generative pre-trained transformer for biomedical text generation and mining", 2022
 
 ## 📦 Installation
 
