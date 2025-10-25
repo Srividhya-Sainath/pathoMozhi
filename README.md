@@ -31,15 +31,15 @@ Rather than using raw image pixels, we extract **patch-level features** using th
 ---
 ## 📚 References
 
-[1] Galkowicz, D., Sainath, S., Wagner, S.J., et al. *PRISM: A Foundation Model for Pathology*, 2024.  
+[1] *PRISM: A Foundation Model for Pathology*, 2024.  
 
-[2] Dolezal, J., Jaume, G., Wagner, S.J., et al. *HistoGPT: Unifying Histology and Language with Generative Modeling*, 2023.  
+[2] *HistoGPT: Unifying Histology and Language with Generative Modeling*, 2023.  
 
-[3] Ding, T., Wagner, S.J., Song, A.H., et al. *Multimodal Whole Slide Foundation Model for Pathology*, 2024.
+[3] *Multimodal Whole Slide Foundation Model for Pathology*, 2024.
 
-[4] Alayrac, J.-B., Donahue, J., Luc, P., et al. *Flamingo: a Visual Language Model for Few-Shot Learning*, 2022.
+[4] *Flamingo: a Visual Language Model for Few-Shot Learning*, 2022.
 
-[5] Liu, R., Guo, J., Song, K., et al. *BioGPT: Generative Pre-trained Transformer for Biomedical Text Generation and Mining*, 2022.
+[5] *BioGPT: Generative Pre-trained Transformer for Biomedical Text Generation and Mining*, 2022.
 
 ## 📦 Installation
 
